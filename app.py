@@ -1007,15 +1007,30 @@ def report_page():
     
     # 查詢與下載
     st.write("---")
+
+    result_df = pd.DataFrame()
     
     col1, col2 = st.columns([1, 1])
     
     with col1:
         preview_clicked = st.button("👁️ 預覽資料", use_container_width=True)
     
+    # 顯示預覽
+    if preview_clicked or "preview_shown" in st.session_state:
+        result_df = query_data(selected_table, filters)
+
+        st.write("---")
+        st.subheader("📋 資料預覽")
+        
+        if result_df.empty:
+            st.info("🔍 無符合篩選條件的資料")
+        else:
+            st.write(f"共 {len(result_df)} 筆資料（顯示前 100 筆）")
+            st.dataframe(result_df.head(100), use_container_width=True)
+            st.session_state["preview_shown"] = True
+
     with col2:
         # 先查詢資料以便產生下載檔案
-        result_df = query_data(selected_table, filters)
         
         if not result_df.empty:
             # 產生 Excel 檔案
@@ -1043,18 +1058,6 @@ def report_page():
                 use_container_width=True,
                 help="無符合條件的資料"
             )
-    
-    # 顯示預覽
-    if preview_clicked or "preview_shown" in st.session_state:
-        st.write("---")
-        st.subheader("📋 資料預覽")
-        
-        if result_df.empty:
-            st.info("🔍 無符合篩選條件的資料")
-        else:
-            st.write(f"共 {len(result_df)} 筆資料（顯示前 100 筆）")
-            st.dataframe(result_df.head(100), use_container_width=True)
-            st.session_state["preview_shown"] = True
 
 
 # =============================================================================
