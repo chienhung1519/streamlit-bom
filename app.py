@@ -940,133 +940,169 @@ def estimate_page():
         )
 
 
+def _parse_uploaded_file(uploaded_file) -> dict | None:
+    """
+    解析單一上傳檔案，回傳包含 df 的 dict；失敗時回傳含 error 的 dict
+    """
+    file_name = uploaded_file.name
+    project_name = parse_project_name(file_name)
+    try:
+        excel_file = pd.ExcelFile(uploaded_file)
+        required_sheets = ["EE_BOM", "Cost_Adder_Logistic"]
+        missing_sheets = [s for s in required_sheets if s not in excel_file.sheet_names]
+        if missing_sheets:
+            return {"file_name": file_name, "error": f"缺少工作表：{', '.join(missing_sheets)}"}
+
+        df_ee_bom = pd.read_excel(excel_file, sheet_name="EE_BOM")
+        df_cost_adder = pd.read_excel(excel_file, sheet_name="Cost_Adder_Logistic")
+
+        df_ee_bom.insert(0, "Project_Name", project_name)
+        df_cost_adder.insert(0, "Project_Name", project_name)
+        df_ee_bom["File_Name"] = file_name
+        df_cost_adder["File_Name"] = file_name
+
+        quarter_value = None
+        if "Effective_Start_Date" in df_ee_bom.columns:
+            for date_val in df_ee_bom["Effective_Start_Date"]:
+                q = date_to_quarter(date_val)
+                if q:
+                    quarter_value = q
+                    break
+        df_ee_bom["Quarter"] = quarter_value
+
+        if "Parent_DPN" in df_cost_adder.columns and "PARENT_DPN" in df_ee_bom.columns:
+            dpn_quarter_map = df_ee_bom.groupby("PARENT_DPN")["Quarter"].first().to_dict()
+            df_cost_adder["Quarter"] = df_cost_adder["Parent_DPN"].map(dpn_quarter_map)
+        else:
+            df_cost_adder["Quarter"] = quarter_value
+
+        return {
+            "file_name": file_name,
+            "project_name": project_name,
+            "quarter": quarter_value or "N/A",
+            "ee_bom_rows": len(df_ee_bom),
+            "cost_adder_rows": len(df_cost_adder),
+            "df_ee_bom": df_ee_bom,
+            "df_cost_adder": df_cost_adder,
+        }
+    except Exception as e:
+        return {"file_name": file_name, "error": str(e)}
+
+
 def upload_page():
     """上傳資料頁面"""
     st.header("📤 上傳資料")
-    
+
     st.info("""
     **使用說明：**
-    1. 上傳 Excel 檔案（.xlsx）
+    1. 支援**批次上傳**，可同時選取多個 Excel 檔案（.xlsx），單檔上限 200MB
     2. 檔名格式範例：`(Dell) SEBOM_Foxconn_Boss S2_PROD_Quote_20250411.xlsx`
     3. 系統會自動讀取 `EE_BOM` 和 `Cost_Adder_Logistic` 兩個 Sheet
     4. `Effective_Start_Date` 會自動轉換為 `Quarter`
     """)
-    
-    uploaded_file = st.file_uploader(
-        "選擇 Excel 檔案",
-        type=["xlsx"],
-        help="請上傳包含 EE_BOM 和 Cost_Adder_Logistic 工作表的 Excel 檔案"
-    )
-    
-    if uploaded_file is not None:
-        # 解析 Project_Name
-        file_name = uploaded_file.name
-        project_name = parse_project_name(file_name)
 
+    # 上傳結果顯示（rerun 後從 session state 取出）
+    if "upload_success" in st.session_state:
+        result = st.session_state.pop("upload_success")
+        for err in result.get("errors", []):
+            st.error(f"❌ **{err['file_name']}**：{err['error']}")
+        if result["count"] > 0:
+            if result["deleted_ee"] > 0 or result["deleted_cost"] > 0:
+                st.info(f"🗑️ 已覆蓋同檔名舊資料：EE_BOM {result['deleted_ee']} 筆、Cost_Adder_Logistic {result['deleted_cost']} 筆")
+            st.success(f"✅ 批次上傳完成！成功 {result['count']} 個檔案")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric(label="EE_BOM", value=f"{result['total_ee']} 筆新增")
+            with col2:
+                st.metric(label="Cost_Adder_Logistic", value=f"{result['total_cost']} 筆新增")
         st.write("---")
-        st.subheader("📋 檔案資訊")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write(f"**檔案名稱：** {file_name}")
-        with col2:
-            st.write(f"**解析出的 Project_Name：** `{project_name}`")
-        
-        # 讀取 Excel
-        try:
-            excel_file = pd.ExcelFile(uploaded_file)
-            sheet_names = excel_file.sheet_names
-            
-            # 檢查必要的 Sheet
-            required_sheets = ["EE_BOM", "Cost_Adder_Logistic"]
-            missing_sheets = [s for s in required_sheets if s not in sheet_names]
-            
-            if missing_sheets:
-                st.error(f"❌ 缺少以下工作表：{', '.join(missing_sheets)}")
-                st.write(f"檔案中的工作表：{', '.join(sheet_names)}")
-                return
-            
-            # 讀取資料
-            df_ee_bom = pd.read_excel(excel_file, sheet_name="EE_BOM")
-            df_cost_adder = pd.read_excel(excel_file, sheet_name="Cost_Adder_Logistic")
-            
-            # 加入 Project_Name 和 File_Name 欄位
-            df_ee_bom.insert(0, "Project_Name", project_name)
-            df_cost_adder.insert(0, "Project_Name", project_name)
-            df_ee_bom["File_Name"] = file_name
-            df_cost_adder["File_Name"] = file_name
-            
-            # 轉換 Effective_Start_Date 為 Quarter
-            quarter_value = None
-            if "Effective_Start_Date" in df_ee_bom.columns:
-                # 取第一筆有效的日期來轉換
-                for date_val in df_ee_bom["Effective_Start_Date"]:
-                    q = date_to_quarter(date_val)
-                    if q:
-                        quarter_value = q
-                        break
-                
-                df_ee_bom["Quarter"] = quarter_value
-                st.write(f"**轉換後的 Quarter：** `{quarter_value}`")
-            else:
-                st.warning("⚠️ EE_BOM 中沒有 Effective_Start_Date 欄位")
-                df_ee_bom["Quarter"] = None
-            
-            # Cost_Adder_Logistic 的 Quarter 來自 EE_BOM
-            # 根據 Parent_DPN 匹配（取第一筆匹配的）
-            if "Parent_DPN" in df_cost_adder.columns and "PARENT_DPN" in df_ee_bom.columns:
-                # 建立 PARENT_DPN -> Quarter 的對應
-                dpn_quarter_map = df_ee_bom.groupby("PARENT_DPN")["Quarter"].first().to_dict()
-                df_cost_adder["Quarter"] = df_cost_adder["Parent_DPN"].map(dpn_quarter_map)
-            else:
-                df_cost_adder["Quarter"] = quarter_value
-            
-            # 顯示預覽
-            st.write("---")
-            st.subheader("👀 資料預覽")
-            
-            tab1, tab2 = st.tabs(["EE_BOM", "Cost_Adder_Logistic"])
-            
-            with tab1:
-                st.write(f"共 {len(df_ee_bom)} 筆資料")
-                st.dataframe(df_ee_bom.head(10), use_container_width=True)
-            
-            with tab2:
-                st.write(f"共 {len(df_cost_adder)} 筆資料")
-                st.dataframe(df_cost_adder.head(10), use_container_width=True)
-            
-            # 上傳按鈕
-            st.write("---")
-            if st.button("✅ 確認上傳", type="primary", use_container_width=True):
-                with st.spinner("正在處理資料..."):
-                    # 刪除已存在的同檔名資料
-                    deleted_ee = delete_by_filename("EE_BOM", file_name)
-                    deleted_cost = delete_by_filename("Cost_Adder_Logistic", file_name)
 
-                    # 加入 created_at 並寫入資料庫
-                    df_ee_bom["created_at"] = datetime.now().isoformat()
-                    df_cost_adder["created_at"] = datetime.now().isoformat()
+    # 用 counter 作為 key，上傳成功後遞增可重置 widget
+    if "upload_key" not in st.session_state:
+        st.session_state["upload_key"] = 0
+
+    uploaded_files = st.file_uploader(
+        "選擇 Excel 檔案（可多選）",
+        type=["xlsx"],
+        accept_multiple_files=True,
+        key=f"file_uploader_{st.session_state['upload_key']}",
+        help="支援批次上傳，請上傳包含 EE_BOM 和 Cost_Adder_Logistic 工作表的 Excel 檔案"
+    )
+
+    if not uploaded_files:
+        return
+
+    # 解析所有檔案
+    parsed = [_parse_uploaded_file(f) for f in uploaded_files]
+    errors = [r for r in parsed if "error" in r]
+    valid = [r for r in parsed if "error" not in r]
+
+    # 顯示錯誤
+    for r in errors:
+        st.error(f"❌ **{r['file_name']}**：{r['error']}")
+
+    if not valid:
+        return
+
+    st.write("---")
+    st.subheader("📋 檔案摘要")
+
+    summary_df = pd.DataFrame([
+        {
+            "檔案名稱": r["file_name"],
+            "Project_Name": r["project_name"],
+            "Quarter": r["quarter"],
+            "EE_BOM 筆數": r["ee_bom_rows"],
+            "Cost_Adder_Logistic 筆數": r["cost_adder_rows"],
+        }
+        for r in valid
+    ])
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    st.write("---")
+    if st.button("✅ 確認上傳", type="primary", use_container_width=True):
+        with st.spinner(f"正在處理 {len(valid)} 個檔案..."):
+            total_ee = 0
+            total_cost = 0
+            total_deleted_ee = 0
+            total_deleted_cost = 0
+            upload_errors = []
+            succeeded = 0
+
+            for r in valid:
+                try:
+                    total_deleted_ee += delete_by_filename("EE_BOM", r["file_name"])
+                    total_deleted_cost += delete_by_filename("Cost_Adder_Logistic", r["file_name"])
+
+                    df_ee = r["df_ee_bom"].copy()
+                    df_cost = r["df_cost_adder"].copy()
+                    df_ee["created_at"] = datetime.now().isoformat()
+                    df_cost["created_at"] = datetime.now().isoformat()
 
                     conn = get_db_connection()
-                    df_ee_bom.to_sql("EE_BOM", conn, if_exists="append", index=False)
-                    df_cost_adder.to_sql("Cost_Adder_Logistic", conn, if_exists="append", index=False)
+                    df_ee.to_sql("EE_BOM", conn, if_exists="append", index=False)
+                    df_cost.to_sql("Cost_Adder_Logistic", conn, if_exists="append", index=False)
                     conn.close()
 
-                    # 更新 metadata
-                    refresh_metadata()
+                    total_ee += len(df_ee)
+                    total_cost += len(df_cost)
+                    succeeded += 1
+                except Exception as e:
+                    upload_errors.append({"file_name": r["file_name"], "error": str(e)})
 
-                # 顯示結果
-                if deleted_ee > 0 or deleted_cost > 0:
-                    st.info(f"🗑️ 已刪除同檔名舊資料：EE_BOM {deleted_ee} 筆、Cost_Adder_Logistic {deleted_cost} 筆")
-                st.success("✅ 上傳完成！")
+            refresh_metadata()
 
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric(label="EE_BOM", value=f"{len(df_ee_bom)} 筆新增")
-                with col2:
-                    st.metric(label="Cost_Adder_Logistic", value=f"{len(df_cost_adder)} 筆新增")
-        
-        except Exception as e:
-            st.error(f"❌ 讀取檔案時發生錯誤：{str(e)}")
+        # 將結果存入 session state，遞增 key 清空 file_uploader，再 rerun
+        st.session_state["upload_success"] = {
+            "count": succeeded,
+            "total_ee": total_ee,
+            "total_cost": total_cost,
+            "deleted_ee": total_deleted_ee,
+            "deleted_cost": total_deleted_cost,
+            "errors": upload_errors,
+        }
+        st.session_state["upload_key"] += 1
+        st.rerun()
 
 
 def report_page():
