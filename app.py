@@ -188,7 +188,21 @@ def init_database():
             Adder REAL
         )
     """)
-    
+
+    # 建立 Users table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS Users (
+            username TEXT PRIMARY KEY,
+            password TEXT NOT NULL
+        )
+    """)
+
+    # 插入預設使用者
+    cursor.execute(
+        "INSERT OR IGNORE INTO Users (username, password) VALUES (?, ?)",
+        ("rachel", "Foxconn12345$")
+    )
+
     conn.commit()
     conn.close()
 
@@ -258,6 +272,28 @@ def insert_data(table_name: str, df: pd.DataFrame) -> int:
     
     conn.close()
     return len(new_df)
+
+
+def delete_by_filename(table_name: str, file_name: str) -> int:
+    """刪除指定 File_Name 的所有資料，回傳刪除筆數"""
+    if not table_exists(table_name):
+        return 0
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    columns = [row[1] for row in cursor.fetchall()]
+
+    if "File_Name" not in columns:
+        conn.close()
+        return 0
+
+    cursor.execute(f"DELETE FROM {table_name} WHERE File_Name = ?", (file_name,))
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
 
 
 def query_data(table_name: str, filters: dict) -> pd.DataFrame:
@@ -605,32 +641,76 @@ def calculate_em_mva(cur_quarter: str) -> pd.DataFrame:
 
 
 # =============================================================================
+# 使用者驗證
+# =============================================================================
+def verify_user(username: str, password: str) -> bool:
+    """驗證使用者帳號密碼"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT password FROM Users WHERE username = ?", (username,))
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None and result[0] == password
+
+
+# =============================================================================
 # Streamlit UI
 # =============================================================================
+def login_page():
+    """登入頁面"""
+    st.title("📊 BOM 資料管理系統")
+    st.subheader("請先登入")
+
+    _, col2, _ = st.columns([1, 2, 1])
+    with col2:
+        with st.form("login_form"):
+            username = st.text_input("帳號")
+            password = st.text_input("密碼", type="password")
+            submit = st.form_submit_button("登入", use_container_width=True, type="primary")
+
+        if submit:
+            if verify_user(username, password):
+                st.session_state["logged_in"] = True
+                st.session_state["username"] = username
+                st.rerun()
+            else:
+                st.error("❌ 帳號或密碼錯誤")
+
+
 def main():
     st.set_page_config(
         page_title="BOM 資料管理系統",
         page_icon="📊",
         layout="wide"
     )
-    
-    st.title("📊 BOM 資料管理系統")
-    
+
     # 初始化資料庫
     init_database()
-    
+
+    # 登入檢查
+    if not st.session_state.get("logged_in"):
+        login_page()
+        return
+
+    st.title("📊 BOM 資料管理系統")
+
+    # 側邊欄：使用者資訊與登出
+    with st.sidebar:
+        st.caption(f"👤 {st.session_state.get('username', '')}")
+        if st.button("登出", use_container_width=True):
+            st.session_state["logged_in"] = False
+            st.session_state.pop("username", None)
+            st.rerun()
+        st.divider()
+
     # 側邊欄選單
     page = st.sidebar.radio(
         "功能選擇",
-        ["維護 Project/Parent_DPN", "預估 EM/MVA", "上傳資料", "產生報表"],
+        ["上傳資料", "產生報表"],
         index=0
     )
-    
-    if page == "維護 Project/Parent_DPN":
-        maintenance_page()
-    elif page == "預估 EM/MVA":
-        estimate_page()
-    elif page == "上傳資料":
+
+    if page == "上傳資料":
         upload_page()
     else:
         report_page()
@@ -857,13 +937,14 @@ def upload_page():
     
     if uploaded_file is not None:
         # 解析 Project_Name
-        project_name = parse_project_name(uploaded_file.name)
-        
+        file_name = uploaded_file.name
+        project_name = parse_project_name(file_name)
+
         st.write("---")
         st.subheader("📋 檔案資訊")
         col1, col2 = st.columns(2)
         with col1:
-            st.write(f"**檔案名稱：** {uploaded_file.name}")
+            st.write(f"**檔案名稱：** {file_name}")
         with col2:
             st.write(f"**解析出的 Project_Name：** `{project_name}`")
         
@@ -885,9 +966,11 @@ def upload_page():
             df_ee_bom = pd.read_excel(excel_file, sheet_name="EE_BOM")
             df_cost_adder = pd.read_excel(excel_file, sheet_name="Cost_Adder_Logistic")
             
-            # 加入 Project_Name 欄位
+            # 加入 Project_Name 和 File_Name 欄位
             df_ee_bom.insert(0, "Project_Name", project_name)
             df_cost_adder.insert(0, "Project_Name", project_name)
+            df_ee_bom["File_Name"] = file_name
+            df_cost_adder["File_Name"] = file_name
             
             # 轉換 Effective_Start_Date 為 Quarter
             quarter_value = None
@@ -932,29 +1015,32 @@ def upload_page():
             st.write("---")
             if st.button("✅ 確認上傳", type="primary", use_container_width=True):
                 with st.spinner("正在處理資料..."):
-                    # 儲存到資料庫
-                    inserted_ee = insert_data("EE_BOM", df_ee_bom)
-                    inserted_cost = insert_data("Cost_Adder_Logistic", df_cost_adder)
-                    
+                    # 刪除已存在的同檔名資料
+                    deleted_ee = delete_by_filename("EE_BOM", file_name)
+                    deleted_cost = delete_by_filename("Cost_Adder_Logistic", file_name)
+
+                    # 加入 created_at 並寫入資料庫
+                    df_ee_bom["created_at"] = datetime.now().isoformat()
+                    df_cost_adder["created_at"] = datetime.now().isoformat()
+
+                    conn = get_db_connection()
+                    df_ee_bom.to_sql("EE_BOM", conn, if_exists="append", index=False)
+                    df_cost_adder.to_sql("Cost_Adder_Logistic", conn, if_exists="append", index=False)
+                    conn.close()
+
                     # 更新 metadata
                     refresh_metadata()
-                
+
                 # 顯示結果
+                if deleted_ee > 0 or deleted_cost > 0:
+                    st.info(f"🗑️ 已刪除同檔名舊資料：EE_BOM {deleted_ee} 筆、Cost_Adder_Logistic {deleted_cost} 筆")
                 st.success("✅ 上傳完成！")
-                
+
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.metric(
-                        label="EE_BOM",
-                        value=f"{inserted_ee} 筆新增",
-                        delta=f"共 {len(df_ee_bom)} 筆（{len(df_ee_bom) - inserted_ee} 筆重複）"
-                    )
+                    st.metric(label="EE_BOM", value=f"{len(df_ee_bom)} 筆新增")
                 with col2:
-                    st.metric(
-                        label="Cost_Adder_Logistic",
-                        value=f"{inserted_cost} 筆新增",
-                        delta=f"共 {len(df_cost_adder)} 筆（{len(df_cost_adder) - inserted_cost} 筆重複）"
-                    )
+                    st.metric(label="Cost_Adder_Logistic", value=f"{len(df_cost_adder)} 筆新增")
         
         except Exception as e:
             st.error(f"❌ 讀取檔案時發生錯誤：{str(e)}")
