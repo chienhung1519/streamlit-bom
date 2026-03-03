@@ -274,6 +274,27 @@ def insert_data(table_name: str, df: pd.DataFrame) -> int:
     return len(new_df)
 
 
+def get_all_file_names() -> list:
+    """取得所有已上傳的檔名（跨 EE_BOM 和 Cost_Adder_Logistic）"""
+    file_names = set()
+    for table in ["EE_BOM", "Cost_Adder_Logistic"]:
+        if not table_exists(table):
+            continue
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(f"PRAGMA table_info({table})")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "File_Name" in columns:
+            cursor.execute(
+                f"SELECT DISTINCT File_Name FROM {table} WHERE File_Name IS NOT NULL AND File_Name != ''"
+            )
+            for row in cursor.fetchall():
+                if row[0]:
+                    file_names.add(row[0])
+        conn.close()
+    return sorted(list(file_names))
+
+
 def delete_by_filename(table_name: str, file_name: str) -> int:
     """刪除指定 File_Name 的所有資料，回傳刪除筆數"""
     if not table_exists(table_name):
@@ -706,14 +727,16 @@ def main():
     # 側邊欄選單
     page = st.sidebar.radio(
         "功能選擇",
-        ["上傳資料", "產生報表"],
+        ["上傳資料", "產生報表", "已上傳清單"],
         index=0
     )
 
     if page == "上傳資料":
         upload_page()
-    else:
+    elif page == "產生報表":
         report_page()
+    else:
+        uploaded_list_page()
 
 
 def maintenance_page():
@@ -1095,25 +1118,38 @@ def report_page():
     st.write("---")
 
     result_df = pd.DataFrame()
-    
+
     col1, col2 = st.columns([1, 1])
-    
+
     with col1:
         preview_clicked = st.button("👁️ 預覽資料", use_container_width=True)
-    
+
+    # 篩選條件或資料表改變時，清空預覽
+    if "preview_shown" in st.session_state:
+        if (filters != st.session_state.get("preview_filters", {}) or
+                selected_table != st.session_state.get("preview_table", "")):
+            st.session_state.pop("preview_shown", None)
+            st.session_state.pop("preview_filters", None)
+            st.session_state.pop("preview_table", None)
+
+    # 點擊預覽時儲存當前篩選條件
+    if preview_clicked:
+        st.session_state["preview_shown"] = True
+        st.session_state["preview_filters"] = {k: list(v) for k, v in filters.items()}
+        st.session_state["preview_table"] = selected_table
+
     # 顯示預覽
-    if preview_clicked or "preview_shown" in st.session_state:
+    if "preview_shown" in st.session_state:
         result_df = query_data(selected_table, filters)
 
         st.write("---")
         st.subheader("📋 資料預覽")
-        
+
         if result_df.empty:
             st.info("🔍 無符合篩選條件的資料")
         else:
             st.write(f"共 {len(result_df)} 筆資料（顯示前 100 筆）")
             st.dataframe(result_df.head(100), use_container_width=True)
-            st.session_state["preview_shown"] = True
 
     with col2:
         # 先查詢資料以便產生下載檔案
@@ -1144,6 +1180,43 @@ def report_page():
                 use_container_width=True,
                 help="無符合條件的資料"
             )
+
+
+def uploaded_list_page():
+    """已上傳清單頁面"""
+    st.header("📁 已上傳清單")
+
+    file_names = get_all_file_names()
+
+    if not file_names:
+        st.info("尚無上傳記錄")
+        return
+
+    keyword = st.text_input("🔍 關鍵字搜尋", placeholder="輸入檔名關鍵字...")
+    filtered_names = [f for f in file_names if keyword.lower() in f.lower()] if keyword else file_names
+
+    st.write(f"共 {len(file_names)} 個檔案" + (f"，符合搜尋結果 {len(filtered_names)} 個" if keyword else ""))
+    st.write("---")
+
+    selected_files = []
+    for file_name in filtered_names:
+        if st.checkbox(file_name, key=f"del_file_{file_name}"):
+            selected_files.append(file_name)
+
+    st.write("---")
+    if st.button(
+        "🗑️ 刪除",
+        type="primary",
+        disabled=len(selected_files) == 0,
+        help="請先勾選要刪除的檔案" if not selected_files else f"刪除已勾選的 {len(selected_files)} 個檔案",
+    ):
+        total_deleted = 0
+        for file_name in selected_files:
+            for table in ["EE_BOM", "Cost_Adder_Logistic"]:
+                total_deleted += delete_by_filename(table, file_name)
+        refresh_metadata()
+        st.success(f"✅ 已刪除 {len(selected_files)} 個檔案，共 {total_deleted} 筆資料")
+        st.rerun()
 
 
 # =============================================================================
