@@ -1339,11 +1339,30 @@ def plan_to_em_page():
                 if "created_at" in df.columns:
                     df.drop(columns=["created_at"], inplace=True)
 
-        # 找出未查到的 MPN
+        # 找出輸入 MPN 中 EM_DM 為 EM 的（已被 EM Data 涵蓋，不再輸出至 MPN Query）
+        em_input_mpns = []
+        if not df_mpn.empty and "EM_DM" in df_mpn.columns:
+            em_mask = df_mpn["EM_DM"] == "EM"
+            em_input_mpns = list(df_mpn.loc[em_mask, "MPN"].unique())
+            df_mpn = df_mpn[~em_mask].reset_index(drop=True)
+
+        # 找出未查到的 MPN（排除 EM 的那些，因為它們有被查到，只是移至 EM Data）
         found_mpns = set(df_mpn["MPN"].unique()) if not df_mpn.empty else set()
+        found_mpns.update(em_input_mpns)
         not_found_mpns = [m for m in input_mpns if m not in found_mpns]
 
+        # 確保 EM Data 不重複
+        if not df_em.empty:
+            df_em = df_em.drop_duplicates()
+
         st.write("---")
+
+        # 顯示 EM_DM 為 EM 的輸入 MPN
+        if em_input_mpns:
+            st.warning(
+                f"⚠️ 以下 {len(em_input_mpns)} 個 MPN 的 EM_DM 為 **EM**，已包含於 EM Data，不另外輸出至 MPN Query：\n\n"
+                + "\n".join(f"- `{m}`" for m in em_input_mpns)
+            )
 
         # 顯示未找到的 MPN
         if not_found_mpns:
