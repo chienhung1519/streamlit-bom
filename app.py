@@ -1233,7 +1233,21 @@ def uploaded_list_page():
     keyword = st.text_input("🔍 關鍵字搜尋", placeholder="輸入檔名關鍵字...")
     filtered_names = [f for f in file_names if keyword.lower() in f.lower()] if keyword else file_names
 
-    st.write(f"共 {len(file_names)} 個檔案" + (f"，符合搜尋結果 {len(filtered_names)} 個" if keyword else ""))
+    col_info, col_dl = st.columns([3, 1])
+    with col_info:
+        st.write(f"共 {len(file_names)} 個檔案" + (f"，符合搜尋結果 {len(filtered_names)} 個" if keyword else ""))
+    with col_dl:
+        dl_df = pd.DataFrame({"檔案名稱": file_names})
+        dl_buf = io.BytesIO()
+        with pd.ExcelWriter(dl_buf, engine="xlsxwriter") as writer:
+            dl_df.to_excel(writer, sheet_name="已上傳清單", index=False)
+        st.download_button(
+            label="⬇️ 下載清單",
+            data=dl_buf.getvalue(),
+            file_name=f"已上傳清單_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
     st.write("---")
 
     selected_files = []
