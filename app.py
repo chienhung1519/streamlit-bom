@@ -1266,9 +1266,7 @@ def plan_to_em_page():
     1. 在下方文字框貼上 MPN 清單，每行一個 MPN
     2. 選擇目標 Quarter
     3. 點擊「查詢」按鈕
-    4. 系統將產生包含兩個工作表的 Excel 檔案：
-       - **MPN Query**：符合輸入 MPN 與 Quarter 的資料
-       - **EM Data**：該 Quarter 中所有 EM_DM 為 EM 的資料
+    4. 系統將產生 Excel 檔案，包含：符合輸入 MPN 與 Quarter 的資料，以及該 Quarter 中所有 EM_DM 為 EM 的資料（合併為單一工作表）
     5. 若有 MPN 在資料庫中找不到，會顯示於畫面上
     """)
 
@@ -1383,21 +1381,16 @@ def plan_to_em_page():
             return
 
         # 預覽
-        if not df_mpn.empty:
-            st.subheader("📌 MPN Query 預覽（前 50 筆）")
-            st.dataframe(df_mpn.head(50), use_container_width=True)
+        df_combined_preview = pd.concat([df_mpn, df_em], ignore_index=True).drop_duplicates()
+        if not df_combined_preview.empty:
+            st.subheader(f"📌 預覽（前 50 筆，共 {len(df_combined_preview)} 筆）")
+            st.dataframe(df_combined_preview.head(50), use_container_width=True)
 
-        if not df_em.empty:
-            st.subheader("📌 EM Data 預覽（前 50 筆）")
-            st.dataframe(df_em.head(50), use_container_width=True)
-
-        # 產生 Excel（兩個工作表）
+        # 合併兩份資料並輸出成單一工作表
+        df_combined = pd.concat([df_mpn, df_em], ignore_index=True).drop_duplicates()
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            if not df_mpn.empty:
-                df_mpn.to_excel(writer, sheet_name="MPN Query", index=False)
-            if not df_em.empty:
-                df_em.to_excel(writer, sheet_name="EM Data", index=False)
+            df_combined.to_excel(writer, sheet_name="Plan_to_EM", index=False)
         excel_data = output.getvalue()
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
