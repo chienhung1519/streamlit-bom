@@ -727,7 +727,7 @@ def main():
     # 側邊欄選單
     page = st.sidebar.radio(
         "功能選擇",
-        ["上傳資料", "產生報表", "已上傳清單"],
+        ["上傳資料", "產生報表", "已上傳清單", "Plan to EM"],
         index=0
     )
 
@@ -735,8 +735,10 @@ def main():
         upload_page()
     elif page == "產生報表":
         report_page()
-    else:
+    elif page == "已上傳清單":
         uploaded_list_page()
+    else:
+        plan_to_em_page()
 
 
 def maintenance_page():
@@ -1253,6 +1255,143 @@ def uploaded_list_page():
         refresh_metadata()
         st.success(f"✅ 已刪除 {len(selected_files)} 個檔案，共 {total_deleted} 筆資料")
         st.rerun()
+
+
+def plan_to_em_page():
+    """Plan to EM 頁面"""
+    st.header("📋 Plan to EM")
+
+    st.info("""
+    **使用說明：**
+    1. 在下方文字框貼上 MPN 清單，每行一個 MPN
+    2. 選擇目標 Quarter
+    3. 點擊「查詢」按鈕
+    4. 系統將產生包含兩個工作表的 Excel 檔案：
+       - **MPN Query**：符合輸入 MPN 與 Quarter 的資料
+       - **EM Data**：該 Quarter 中所有 EM_DM 為 EM 的資料
+    5. 若有 MPN 在資料庫中找不到，會顯示於畫面上
+    """)
+
+    st.write("---")
+
+    col1, col2 = st.columns([3, 1])
+
+    with col1:
+        mpn_input = st.text_area(
+            "輸入 MPN 清單（每行一個）",
+            height=200,
+            placeholder="請貼上 MPN，每行一個，例如：\nABC123\nDEF456\nGHI789",
+        )
+
+    with col2:
+        # 只列出資料庫中存在的 Quarter
+        if table_exists("EE_BOM"):
+            conn = get_db_connection()
+            rows = conn.execute(
+                "SELECT DISTINCT Quarter FROM EE_BOM WHERE Quarter IS NOT NULL AND Quarter != '' ORDER BY Quarter"
+            ).fetchall()
+            conn.close()
+            available_quarters = [r[0] for r in rows]
+        else:
+            available_quarters = []
+
+        if not available_quarters:
+            st.warning("⚠️ 資料庫中尚無 Quarter 資料")
+            selected_quarter = None
+        else:
+            current_q = get_current_quarter()
+            default_idx = available_quarters.index(current_q) if current_q in available_quarters else 0
+            selected_quarter = st.selectbox(
+                "選擇 Quarter",
+                options=available_quarters,
+                index=default_idx,
+            )
+
+    if st.button("🔍 查詢", type="primary", use_container_width=True, disabled=selected_quarter is None):
+        # 解析 MPN 輸入
+        raw_lines = mpn_input.strip().splitlines()
+        input_mpns = [line.strip() for line in raw_lines if line.strip()]
+
+        if not input_mpns:
+            st.warning("⚠️ 請輸入至少一個 MPN")
+            return
+
+        with st.spinner("查詢中..."):
+            # 查詢 1：符合輸入 MPN 與 Quarter 的資料
+            conn = get_db_connection()
+            placeholders = ", ".join(["?" for _ in input_mpns])
+            query_mpn = f"""
+                SELECT * FROM EE_BOM
+                WHERE Quarter = ? AND MPN IN ({placeholders})
+            """
+            df_mpn = pd.read_sql(query_mpn, conn, params=[selected_quarter] + input_mpns)
+
+            # 查詢 2：該 Quarter 中 EM_DM 為 EM 的資料
+            df_em = pd.read_sql(
+                "SELECT * FROM EE_BOM WHERE Quarter = ? AND EM_DM = 'EM'",
+                conn,
+                params=[selected_quarter],
+            )
+            conn.close()
+
+            # 移除 created_at
+            for df in [df_mpn, df_em]:
+                if "created_at" in df.columns:
+                    df.drop(columns=["created_at"], inplace=True)
+
+        # 找出未查到的 MPN
+        found_mpns = set(df_mpn["MPN"].unique()) if not df_mpn.empty else set()
+        not_found_mpns = [m for m in input_mpns if m not in found_mpns]
+
+        st.write("---")
+
+        # 顯示未找到的 MPN
+        if not_found_mpns:
+            st.warning(
+                f"⚠️ 以下 {len(not_found_mpns)} 個 MPN 在 **{selected_quarter}** 的資料庫中找不到：\n\n"
+                + "\n".join(f"- `{m}`" for m in not_found_mpns)
+            )
+
+        # 顯示查詢結果摘要
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.metric("MPN Query 筆數", len(df_mpn))
+        with col_b:
+            st.metric("EM Data 筆數", len(df_em))
+
+        if df_mpn.empty and df_em.empty:
+            st.info(f"🔍 在 {selected_quarter} 中查無任何資料")
+            return
+
+        # 預覽
+        if not df_mpn.empty:
+            st.subheader("📌 MPN Query 預覽（前 50 筆）")
+            st.dataframe(df_mpn.head(50), use_container_width=True)
+
+        if not df_em.empty:
+            st.subheader("📌 EM Data 預覽（前 50 筆）")
+            st.dataframe(df_em.head(50), use_container_width=True)
+
+        # 產生 Excel（兩個工作表）
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            if not df_mpn.empty:
+                df_mpn.to_excel(writer, sheet_name="MPN Query", index=False)
+            if not df_em.empty:
+                df_em.to_excel(writer, sheet_name="EM Data", index=False)
+        excel_data = output.getvalue()
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"Plan_to_EM_{selected_quarter}_{timestamp}.xlsx"
+
+        st.download_button(
+            label="⬇️ 下載 Excel 報表",
+            data=excel_data,
+            file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            type="primary",
+        )
 
 
 # =============================================================================
